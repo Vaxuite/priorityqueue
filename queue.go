@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"github.com/google/uuid"
-	"golang.org/x/sync/semaphore"
+	"github.com/marusama/semaphore"
 	"sync"
 	"time"
 )
 
 type Config struct {
-	BufferSize   int64
-	BatchSize    int
-	WaitDuration time.Duration
+	BaseWorkers      int
+	BatchSize        int
+	BufferSize       int
+	WaitDuration     time.Duration
+	ExecutionTimeout time.Duration
 }
 
 type Level int
@@ -22,51 +24,68 @@ var (
 	Low  Level = 1
 )
 
-type internalRequest[Request any] struct {
-	request *Request
-	id      uuid.UUID
+type internalRequest[Request any, Response any] struct {
+	request  *Request
+	id       string
+	response func(*Response, error)
+}
+
+type KeyedResponse[Response any] struct {
+	ID       string
+	Response *Response
+}
+
+type KeyedRequest[Request any] struct {
+	ID      string
+	Request *Request
 }
 
 type Executor[Request any, Response any] interface {
-	Execute(ctx context.Context, batch []*Request) ([]*Response, error)
+	Execute(ctx context.Context, batch []*KeyedRequest[Request], responses chan *KeyedResponse[Response]) error
 }
 
 type Priority[Request any, Response any] struct {
-	highPriority  chan *internalRequest[Request]
-	lowPriority   chan *internalRequest[Request]
-	resultsMap    map[uuid.UUID]func(result *Response, err error)
-	totalEnqueued *semaphore.Weighted
-	executor      Executor[Request, Response]
-	config        Config
+	highPriority chan *internalRequest[Request, Response]
+	lowPriority  chan *internalRequest[Request, Response]
+	executor     Executor[Request, Response]
+	config       Config
+	pool         semaphore.Semaphore
 }
 
-func NewPriority[Request any, Response any](config Config) *Priority[Request, Response] {
+func NewPriority[Request any, Response any](config Config, executor Executor[Request, Response]) *Priority[Request, Response] {
 	p := &Priority[Request, Response]{
-		highPriority:  make(chan *internalRequest[Request], config.BufferSize),
-		lowPriority:   make(chan *internalRequest[Request], config.BufferSize),
-		resultsMap:    map[uuid.UUID]func(result *Response, err error){},
-		config:        config,
-		totalEnqueued: semaphore.NewWeighted(config.BufferSize),
+		highPriority: make(chan *internalRequest[Request, Response], config.BufferSize),
+		lowPriority:  make(chan *internalRequest[Request, Response], config.BufferSize),
+		config:       config,
+		executor:     executor,
 	}
+
+	p.pool = semaphore.New(p.config.BaseWorkers)
+	go p.startWorkerPool()
 	return p
 }
 
-func (p *Priority[Request, Response]) Enqueue(ctx context.Context, item *Request, level Level) (*Response, error) {
-	if err := p.totalEnqueued.Acquire(ctx, 1); err != nil {
-		return nil, err
+func (p *Priority[Request, Response]) createExecutors(amount int) []func(ctx context.Context, batch []*KeyedRequest[Request], responses chan *KeyedResponse[Response]) error {
+	var executors []func(ctx context.Context, batch []*KeyedRequest[Request], responses chan *KeyedResponse[Response]) error
+	for x := 0; x < amount; x++ {
+		executors = append(executors, p.executor.Execute)
 	}
+	return executors
+}
+
+func (p *Priority[Request, Response]) Enqueue(ctx context.Context, item *Request, level Level) (*Response, error) {
 	var returnedResponse *Response
 	var returnedError error
 	wg := sync.WaitGroup{}
 	id := uuid.New()
-	p.resultsMap[id] = func(response *Response, err error) {
-		returnedResponse = response
-		returnedError = err
-		wg.Done()
-	}
-	request := &internalRequest[Request]{
+	request := &internalRequest[Request, Response]{
 		request: item,
-		id:      id,
+		id:      id.String(),
+		response: func(response *Response, err error) {
+			returnedResponse = response
+			returnedError = err
+			wg.Done()
+		},
 	}
 	switch level {
 	case High:
@@ -90,8 +109,17 @@ func (p *Priority[Request, Response]) startWorkerPool() error {
 		}
 		batch := p.makeBatch(p.config.BatchSize)
 		if len(batch) > 0 {
+			err := p.pool.Acquire(context.Background(), 1)
+			if err != nil {
+				return err
+			}
 			go func() {
-				errChan <- p.executeBatch(batch)
+				defer func() {
+					p.pool.Release(1)
+				}()
+				if err := p.executeBatch(batch); err != nil {
+					errChan <- err
+				}
 			}()
 		} else {
 			// wait again as batch was empty
@@ -99,24 +127,53 @@ func (p *Priority[Request, Response]) startWorkerPool() error {
 	}
 }
 
-func (p *Priority[Request, Response]) executeBatch(batch []*internalRequest[Request]) error {
-	var requestBatch []*Request
+func (p *Priority[Request, Response]) executeBatch(batch []*internalRequest[Request, Response]) error {
+	var requestBatch []*KeyedRequest[Request]
 	for _, i := range batch {
-		requestBatch = append(requestBatch, i.request)
+		requestBatch = append(requestBatch, &KeyedRequest[Request]{
+			ID:      i.id,
+			Request: i.request,
+		})
 	}
-	// todo: better context
-	responses, err := p.executor.Execute(context.Background(), requestBatch)
-	if len(responses) != len(batch) {
-		return fmt.Errorf("different number of responses to requests returned")
+	ctx, cancel := context.WithTimeout(context.Background(), p.config.ExecutionTimeout)
+	defer cancel()
+	responseChannel := make(chan *KeyedResponse[Response])
+	go func() {
+		err := p.executor.Execute(ctx, requestBatch, responseChannel)
+		if err != nil {
+			for _, req := range batch {
+				req.response(nil, fmt.Errorf("failed to execute batch: %w", err))
+			}
+		}
+	}()
+
+	for x := 0; x < len(requestBatch); x++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case response := <-responseChannel:
+			found := false
+		l:
+			for _, req := range batch {
+				if response.ID != req.id {
+					continue
+				}
+				req.response(response.Response, nil)
+				found = true
+				break l
+			}
+			if !found {
+				return fmt.Errorf("responded to request that didnt exist: %s", response.ID)
+			}
+		}
 	}
-	for i := 0; i < len(batch); i++ {
-		p.resultsMap[batch[i].id](responses[i], err)
-	}
+	close(responseChannel)
+
 	return nil
 }
 
-func (p *Priority[Request, Response]) makeBatch(size int) []*internalRequest[Request] {
-	var batch []*internalRequest[Request]
+func (p *Priority[Request, Response]) makeBatch(size int) []*internalRequest[Request, Response] {
+	var batch []*internalRequest[Request, Response]
 	done := time.After(p.config.WaitDuration)
 	for {
 		if len(batch) == size {
@@ -127,10 +184,8 @@ func (p *Priority[Request, Response]) makeBatch(size int) []*internalRequest[Req
 			return batch
 		case item := <-p.highPriority:
 			batch = append(batch, item)
-			p.totalEnqueued.Release(1)
 		case item := <-p.lowPriority:
 			batch = append(batch, item)
-			p.totalEnqueued.Release(1)
 		}
 
 	}
