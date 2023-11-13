@@ -46,12 +46,14 @@ func TestPriority_Enqueue(t *testing.T) {
 	tracer := otel.GetTracerProvider().Tracer("test")
 
 	t.Run("batch size 1 success", func(t *testing.T) {
-		testConfig := Config{
-			BufferSize:       1,
-			BatchSize:        1,
-			WaitDuration:     time.Millisecond * 10,
-			ExecutionTimeout: time.Second * 10,
-			BaseWorkers:      1,
+		testConfig := PriorityConfig{
+			BufferSize:   1,
+			BatchSize:    1,
+			WaitDuration: time.Millisecond * 10,
+			PoolConfig: PoolConfig{
+				ExecutionTimeout: time.Second * 10,
+				BaseWorkers:      1,
+			},
 		}
 		testExecutor := &TestExecutor{}
 		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
@@ -63,12 +65,14 @@ func TestPriority_Enqueue(t *testing.T) {
 	})
 
 	t.Run("batch size 2 success", func(t *testing.T) {
-		testConfig := Config{
-			BufferSize:       2,
-			BatchSize:        2,
-			WaitDuration:     time.Second * 2,
-			ExecutionTimeout: time.Second * 10,
-			BaseWorkers:      1,
+		testConfig := PriorityConfig{
+			BufferSize:   2,
+			BatchSize:    2,
+			WaitDuration: time.Second * 2,
+			PoolConfig: PoolConfig{
+				ExecutionTimeout: time.Second * 10,
+				BaseWorkers:      1,
+			},
 		}
 		testExecutor := &TestExecutor{}
 		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
@@ -93,12 +97,14 @@ func TestPriority_Enqueue(t *testing.T) {
 	})
 
 	t.Run("2 reqs batch size 1 results in 2 executions", func(t *testing.T) {
-		testConfig := Config{
-			BufferSize:       2,
-			BatchSize:        1,
-			WaitDuration:     time.Second * 2,
-			ExecutionTimeout: time.Second * 10,
-			BaseWorkers:      1,
+		testConfig := PriorityConfig{
+			BufferSize:   2,
+			BatchSize:    1,
+			WaitDuration: time.Second * 2,
+			PoolConfig: PoolConfig{
+				ExecutionTimeout: time.Second * 10,
+				BaseWorkers:      1,
+			},
 		}
 		testExecutor := &TestExecutor{}
 		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
@@ -123,12 +129,14 @@ func TestPriority_Enqueue(t *testing.T) {
 	})
 
 	t.Run("10 reqs batch size 2 results in 5 executions", func(t *testing.T) {
-		testConfig := Config{
-			BufferSize:       2,
-			BatchSize:        2,
-			WaitDuration:     time.Second * 2,
-			ExecutionTimeout: time.Second * 10,
-			BaseWorkers:      1,
+		testConfig := PriorityConfig{
+			BufferSize:   2,
+			BatchSize:    2,
+			WaitDuration: time.Second * 2,
+			PoolConfig: PoolConfig{
+				ExecutionTimeout: time.Second * 10,
+				BaseWorkers:      1,
+			},
 		}
 		testExecutor := &TestExecutor{}
 		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
@@ -149,12 +157,14 @@ func TestPriority_Enqueue(t *testing.T) {
 	})
 
 	t.Run("2 parallel workers", func(t *testing.T) {
-		testConfig := Config{
-			BufferSize:       2,
-			BatchSize:        1,
-			WaitDuration:     time.Second * 2,
-			ExecutionTimeout: time.Second * 10,
-			BaseWorkers:      2,
+		testConfig := PriorityConfig{
+			BufferSize:   2,
+			BatchSize:    1,
+			WaitDuration: time.Second * 2,
+			PoolConfig: PoolConfig{
+				ExecutionTimeout: time.Second * 10,
+				BaseWorkers:      2,
+			},
 		}
 		exWg := sync.WaitGroup{}
 		exWg.Add(2)
@@ -177,12 +187,14 @@ func TestPriority_Enqueue(t *testing.T) {
 	})
 
 	t.Run("10 parallel workers", func(t *testing.T) {
-		testConfig := Config{
-			BufferSize:       2,
-			BatchSize:        2,
-			WaitDuration:     time.Second * 2,
-			ExecutionTimeout: time.Second * 10,
-			BaseWorkers:      10,
+		testConfig := PriorityConfig{
+			BufferSize:   2,
+			BatchSize:    2,
+			WaitDuration: time.Second * 2,
+			PoolConfig: PoolConfig{
+				ExecutionTimeout: time.Second * 10,
+				BaseWorkers:      10,
+			},
 		}
 		exWg := sync.WaitGroup{}
 		exWg.Add(10)

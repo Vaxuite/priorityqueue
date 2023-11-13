@@ -4,20 +4,17 @@ import (
 	"context"
 	"fmt"
 	"github.com/google/uuid"
-	"github.com/marusama/semaphore"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sync"
 	"time"
 )
 
-type Config struct {
-	BaseWorkers      int
-	BatchSize        int
-	BufferSize       int
-	WaitDuration     time.Duration
-	ExecutionTimeout time.Duration
-	Name             string
+type PriorityConfig struct {
+	PoolConfig
+	BatchSize    int
+	BufferSize   int
+	WaitDuration time.Duration
 }
 
 type Level string
@@ -51,32 +48,27 @@ type Executor[Request any, Response any] interface {
 type Priority[Request any, Response any] struct {
 	highPriority chan *internalRequest[Request, Response]
 	lowPriority  chan *internalRequest[Request, Response]
-	executor     Executor[Request, Response]
-	config       Config
-	pool         semaphore.Semaphore
+	config       PriorityConfig
+	pool         *Pool[Request, Response]
 	tracer       trace.Tracer
 }
 
-func NewPriority[Request any, Response any](config Config, executor Executor[Request, Response], tracer trace.Tracer) *Priority[Request, Response] {
+func NewPriority[Request any, Response any](config PriorityConfig, executor Executor[Request, Response], tracer trace.Tracer) *Priority[Request, Response] {
 	p := &Priority[Request, Response]{
 		highPriority: make(chan *internalRequest[Request, Response], config.BufferSize),
 		lowPriority:  make(chan *internalRequest[Request, Response], config.BufferSize),
 		config:       config,
-		executor:     executor,
 		tracer:       tracer,
+		pool:         NewPool[Request, Response](config.PoolConfig, executor, tracer),
 	}
 
-	p.pool = semaphore.New(p.config.BaseWorkers)
-	go p.startWorkerPool()
+	go func() {
+		if err := p.startWorkerPool(); err != nil {
+			// better error handling
+			fmt.Println(err.Error())
+		}
+	}()
 	return p
-}
-
-func (p *Priority[Request, Response]) createExecutors(amount int) []func(ctx context.Context, batch []*KeyedRequest[Request], responses chan *KeyedResponse[Response]) error {
-	var executors []func(ctx context.Context, batch []*KeyedRequest[Request], responses chan *KeyedResponse[Response]) error
-	for x := 0; x < amount; x++ {
-		executors = append(executors, p.executor.Execute)
-	}
-	return executors
 }
 
 func (p *Priority[Request, Response]) Enqueue(ctx context.Context, item *Request, level Level) (*Response, error) {
@@ -126,82 +118,16 @@ func (p *Priority[Request, Response]) startWorkerPool() error {
 		}
 		batch := p.makeBatch(p.config.BatchSize)
 		if len(batch) > 0 {
-			err := p.pool.Acquire(context.Background(), 1)
-			if err != nil {
-				return err
-			}
 			go func() {
-				defer func() {
-					p.pool.Release(1)
-				}()
-				if err := p.executeBatch(batch); err != nil {
+				if err := p.pool.executeBatch(batch); err != nil {
 					errChan <- err
 				}
 			}()
+
 		} else {
 			// wait again as batch was empty
 		}
 	}
-}
-
-func (p *Priority[Request, Response]) executeBatch(batch []*internalRequest[Request, Response]) error {
-	var requestBatch []*KeyedRequest[Request]
-	var links []trace.Link
-	for _, i := range batch {
-		requestBatch = append(requestBatch, &KeyedRequest[Request]{
-			ID:      i.id,
-			Request: i.request,
-		})
-		links = append(links, trace.Link{
-			SpanContext: trace.SpanContextFromContext(i.ctx),
-		})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), p.config.ExecutionTimeout)
-	defer cancel()
-	ctx, span := p.tracer.Start(
-		ctx,
-		"PQueue - executeBatch",
-		trace.WithAttributes(
-			attribute.String("queue.name", p.config.Name),
-			attribute.Int("queue.batch_size", len(requestBatch)),
-		),
-		trace.WithLinks(links...),
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	defer span.End()
-	responseChannel := make(chan *KeyedResponse[Response])
-	go func() {
-		err := p.executor.Execute(ctx, requestBatch, responseChannel)
-		if err != nil {
-			for _, req := range batch {
-				req.response(nil, fmt.Errorf("failed to execute batch: %w", err))
-			}
-		}
-	}()
-
-	for x := 0; x < len(requestBatch); x++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case response := <-responseChannel:
-			found := false
-		l:
-			for _, req := range batch {
-				if response.ID != req.id {
-					continue
-				}
-				req.response(response.Response, nil)
-				found = true
-				break l
-			}
-			if !found {
-				return fmt.Errorf("responded to request that didnt exist: %s", response.ID)
-			}
-		}
-	}
-	close(responseChannel)
-
-	return nil
 }
 
 func (p *Priority[Request, Response]) makeBatch(size int) []*internalRequest[Request, Response] {
