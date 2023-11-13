@@ -102,36 +102,40 @@ func (p *Pool[Request, Response]) executeBatch(batch []*internalRequest[Request,
 		p.pool.Release(1)
 	}()
 	responseChannel := make(chan *KeyedResponse[Response])
+	var executionErr error
 	go func() {
 		err := p.executor.Execute(ctx, requestBatch, responseChannel)
 		if err != nil {
-			for _, req := range batch {
-				req.response(nil, fmt.Errorf("failed to execute batch: %w", err))
-			}
+			executionErr = fmt.Errorf("failed to execute batch: %w", err)
+			cancel()
 		}
 	}()
 
 	for x := 0; x < len(requestBatch); x++ {
 		select {
 		case <-ctx.Done():
+			if executionErr != nil {
+				return executionErr
+			}
 			return ctx.Err()
 		case response := <-responseChannel:
-			found := false
-		l:
-			for _, req := range batch {
-				if response.ID != req.id {
-					continue
-				}
-				req.response(response.Response, nil)
-				found = true
-				break l
-			}
-			if !found {
-				return fmt.Errorf("responded to request that didnt exist: %s", response.ID)
+			if err := p.processRequestResponse(batch, response); err != nil {
+				return err
 			}
 		}
 	}
 	close(responseChannel)
 
 	return nil
+}
+
+func (p *Pool[Request, Response]) processRequestResponse(batch []*internalRequest[Request, Response], response *KeyedResponse[Response]) error {
+	for _, req := range batch {
+		if response.ID != req.id {
+			continue
+		}
+		req.response(response.Response, nil)
+		return nil
+	}
+	return fmt.Errorf("responded to request that didnt exist: %s", response.ID)
 }

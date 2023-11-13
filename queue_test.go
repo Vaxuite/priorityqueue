@@ -5,7 +5,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,7 +21,7 @@ type TestResponse struct {
 }
 
 type TestExecutor struct {
-	numRuns int
+	numRuns atomic.Int32
 	wg      *sync.WaitGroup
 }
 
@@ -28,7 +30,7 @@ func (e *TestExecutor) Execute(ctx context.Context, batch []*KeyedRequest[TestRe
 		e.wg.Done()
 		e.wg.Wait()
 	}
-	e.numRuns++
+	e.numRuns.Add(1)
 	for _, i := range batch {
 		response := &TestResponse{newNumber: i.Request.number + 2}
 		responses <- &KeyedResponse[TestResponse]{
@@ -56,12 +58,12 @@ func TestPriority_Enqueue(t *testing.T) {
 			},
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer, slog.Default())
 
 		response, err := queue.Enqueue(context.Background(), &TestRequest{number: 2}, High)
 		r.NoError(err)
 		a.Equal(&TestResponse{newNumber: 4}, response)
-		a.Equal(1, testExecutor.numRuns)
+		a.Equal(1, int(int(testExecutor.numRuns.Load())))
 	})
 
 	t.Run("batch size 2 success", func(t *testing.T) {
@@ -75,7 +77,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			},
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer, slog.Default())
 		wg := sync.WaitGroup{}
 		wg.Add(2)
 		go func() {
@@ -93,7 +95,7 @@ func TestPriority_Enqueue(t *testing.T) {
 
 		wg.Wait()
 
-		a.Equal(1, testExecutor.numRuns)
+		a.Equal(1, int(testExecutor.numRuns.Load()))
 	})
 
 	t.Run("2 reqs batch size 1 results in 2 executions", func(t *testing.T) {
@@ -107,7 +109,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			},
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer, slog.Default())
 		wg := sync.WaitGroup{}
 		wg.Add(2)
 		go func() {
@@ -125,7 +127,7 @@ func TestPriority_Enqueue(t *testing.T) {
 
 		wg.Wait()
 
-		a.Equal(2, testExecutor.numRuns)
+		a.Equal(2, int(testExecutor.numRuns.Load()))
 	})
 
 	t.Run("10 reqs batch size 2 results in 5 executions", func(t *testing.T) {
@@ -139,7 +141,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			},
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer, slog.Default())
 		wg := sync.WaitGroup{}
 		for x := 0; x < 10; x++ {
 			x := x
@@ -153,7 +155,7 @@ func TestPriority_Enqueue(t *testing.T) {
 		}
 
 		wg.Wait()
-		a.Equal(5, testExecutor.numRuns)
+		a.Equal(5, int(testExecutor.numRuns.Load()))
 	})
 
 	t.Run("2 parallel workers", func(t *testing.T) {
@@ -169,7 +171,7 @@ func TestPriority_Enqueue(t *testing.T) {
 		exWg := sync.WaitGroup{}
 		exWg.Add(2)
 		testExecutor := &TestExecutor{wg: &exWg}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer, slog.Default())
 		wg := sync.WaitGroup{}
 		for x := 0; x < 2; x++ {
 			x := x
@@ -183,12 +185,12 @@ func TestPriority_Enqueue(t *testing.T) {
 		}
 
 		wg.Wait()
-		a.Equal(2, testExecutor.numRuns)
+		a.Equal(2, int(testExecutor.numRuns.Load()))
 	})
 
 	t.Run("10 parallel workers", func(t *testing.T) {
 		testConfig := PriorityConfig{
-			BufferSize:   2,
+			BufferSize:   20,
 			BatchSize:    2,
 			WaitDuration: time.Second * 2,
 			PoolConfig: PoolConfig{
@@ -199,7 +201,7 @@ func TestPriority_Enqueue(t *testing.T) {
 		exWg := sync.WaitGroup{}
 		exWg.Add(10)
 		testExecutor := &TestExecutor{wg: &exWg}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer, slog.Default())
 		wg := sync.WaitGroup{}
 		for x := 0; x < 20; x++ {
 			x := x
@@ -213,6 +215,6 @@ func TestPriority_Enqueue(t *testing.T) {
 		}
 
 		wg.Wait()
-		a.Equal(10, testExecutor.numRuns)
+		a.Equal(10, int(testExecutor.numRuns.Load()))
 	})
 }

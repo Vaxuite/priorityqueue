@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"fmt"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -23,6 +22,10 @@ var (
 	High Level = "high"
 	Low  Level = "low"
 )
+
+type Logger interface {
+	Error(msg string, args ...any)
+}
 
 type internalRequest[Request any, Response any] struct {
 	request  *Request
@@ -51,21 +54,22 @@ type Priority[Request any, Response any] struct {
 	config       PriorityConfig
 	pool         *Pool[Request, Response]
 	tracer       trace.Tracer
+	logger       Logger
 }
 
-func NewPriority[Request any, Response any](config PriorityConfig, executor Executor[Request, Response], tracer trace.Tracer) *Priority[Request, Response] {
+func NewPriority[Request any, Response any](config PriorityConfig, executor Executor[Request, Response], tracer trace.Tracer, logger Logger) *Priority[Request, Response] {
 	p := &Priority[Request, Response]{
 		highPriority: make(chan *internalRequest[Request, Response], config.BufferSize),
 		lowPriority:  make(chan *internalRequest[Request, Response], config.BufferSize),
 		config:       config,
 		tracer:       tracer,
 		pool:         NewPool[Request, Response](config.PoolConfig, executor, tracer),
+		logger:       logger,
 	}
 
 	go func() {
 		if err := p.startWorkerPool(); err != nil {
-			// better error handling
-			fmt.Println(err.Error())
+			logger.Error("worker pool failed to start", err)
 		}
 	}()
 	return p
@@ -96,13 +100,14 @@ func (p *Priority[Request, Response]) Enqueue(ctx context.Context, item *Request
 			wg.Done()
 		},
 	}
+	wg.Add(1)
 	switch level {
 	case High:
 		p.highPriority <- request
 	default:
 		p.lowPriority <- request
 	}
-	wg.Add(1)
+
 	// todo: replace with ctx
 	wg.Wait()
 	return returnedResponse, returnedError
@@ -120,10 +125,11 @@ func (p *Priority[Request, Response]) startWorkerPool() error {
 		if len(batch) > 0 {
 			go func() {
 				if err := p.pool.executeBatch(batch); err != nil {
-					errChan <- err
+					for _, i := range batch {
+						i.response(nil, err)
+					}
 				}
 			}()
-
 		} else {
 			// wait again as batch was empty
 		}
