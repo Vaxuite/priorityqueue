@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/marusama/semaphore"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"sync"
 	"time"
 )
@@ -15,19 +17,21 @@ type Config struct {
 	BufferSize       int
 	WaitDuration     time.Duration
 	ExecutionTimeout time.Duration
+	Name             string
 }
 
-type Level int
+type Level string
 
 var (
-	High Level = 0
-	Low  Level = 1
+	High Level = "high"
+	Low  Level = "low"
 )
 
 type internalRequest[Request any, Response any] struct {
 	request  *Request
 	id       string
 	response func(*Response, error)
+	ctx      context.Context
 }
 
 type KeyedResponse[Response any] struct {
@@ -50,14 +54,16 @@ type Priority[Request any, Response any] struct {
 	executor     Executor[Request, Response]
 	config       Config
 	pool         semaphore.Semaphore
+	tracer       trace.Tracer
 }
 
-func NewPriority[Request any, Response any](config Config, executor Executor[Request, Response]) *Priority[Request, Response] {
+func NewPriority[Request any, Response any](config Config, executor Executor[Request, Response], tracer trace.Tracer) *Priority[Request, Response] {
 	p := &Priority[Request, Response]{
 		highPriority: make(chan *internalRequest[Request, Response], config.BufferSize),
 		lowPriority:  make(chan *internalRequest[Request, Response], config.BufferSize),
 		config:       config,
 		executor:     executor,
+		tracer:       tracer,
 	}
 
 	p.pool = semaphore.New(p.config.BaseWorkers)
@@ -74,6 +80,16 @@ func (p *Priority[Request, Response]) createExecutors(amount int) []func(ctx con
 }
 
 func (p *Priority[Request, Response]) Enqueue(ctx context.Context, item *Request, level Level) (*Response, error) {
+	ctx, span := p.tracer.Start(
+		ctx,
+		"PQueue - Enqueue",
+		trace.WithAttributes(
+			attribute.String("queue.name", p.config.Name),
+			attribute.String("queue.priority", string(level)),
+		),
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
 	var returnedResponse *Response
 	var returnedError error
 	wg := sync.WaitGroup{}
@@ -81,6 +97,7 @@ func (p *Priority[Request, Response]) Enqueue(ctx context.Context, item *Request
 	request := &internalRequest[Request, Response]{
 		request: item,
 		id:      id.String(),
+		ctx:     ctx,
 		response: func(response *Response, err error) {
 			returnedResponse = response
 			returnedError = err
@@ -129,14 +146,29 @@ func (p *Priority[Request, Response]) startWorkerPool() error {
 
 func (p *Priority[Request, Response]) executeBatch(batch []*internalRequest[Request, Response]) error {
 	var requestBatch []*KeyedRequest[Request]
+	var links []trace.Link
 	for _, i := range batch {
 		requestBatch = append(requestBatch, &KeyedRequest[Request]{
 			ID:      i.id,
 			Request: i.request,
 		})
+		links = append(links, trace.Link{
+			SpanContext: trace.SpanContextFromContext(i.ctx),
+		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.config.ExecutionTimeout)
 	defer cancel()
+	ctx, span := p.tracer.Start(
+		ctx,
+		"PQueue - executeBatch",
+		trace.WithAttributes(
+			attribute.String("queue.name", p.config.Name),
+			attribute.Int("queue.batch_size", len(requestBatch)),
+		),
+		trace.WithLinks(links...),
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
 	responseChannel := make(chan *KeyedResponse[Response])
 	go func() {
 		err := p.executor.Execute(ctx, requestBatch, responseChannel)
