@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"sync"
 	"testing"
 	"time"
@@ -42,6 +43,8 @@ func TestPriority_Enqueue(t *testing.T) {
 	r := require.New(t)
 	a := assert.New(t)
 
+	tracer := otel.GetTracerProvider().Tracer("test")
+
 	t.Run("batch size 1 success", func(t *testing.T) {
 		testConfig := Config{
 			BufferSize:       1,
@@ -51,7 +54,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			BaseWorkers:      1,
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
 
 		response, err := queue.Enqueue(context.Background(), &TestRequest{number: 2}, High)
 		r.NoError(err)
@@ -68,7 +71,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			BaseWorkers:      1,
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
 		wg := sync.WaitGroup{}
 		wg.Add(2)
 		go func() {
@@ -98,7 +101,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			BaseWorkers:      1,
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
 		wg := sync.WaitGroup{}
 		wg.Add(2)
 		go func() {
@@ -128,7 +131,7 @@ func TestPriority_Enqueue(t *testing.T) {
 			BaseWorkers:      1,
 		}
 		testExecutor := &TestExecutor{}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
 		wg := sync.WaitGroup{}
 		for x := 0; x < 10; x++ {
 			x := x
@@ -156,7 +159,7 @@ func TestPriority_Enqueue(t *testing.T) {
 		exWg := sync.WaitGroup{}
 		exWg.Add(2)
 		testExecutor := &TestExecutor{wg: &exWg}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
 		wg := sync.WaitGroup{}
 		for x := 0; x < 2; x++ {
 			x := x
@@ -184,7 +187,7 @@ func TestPriority_Enqueue(t *testing.T) {
 		exWg := sync.WaitGroup{}
 		exWg.Add(10)
 		testExecutor := &TestExecutor{wg: &exWg}
-		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor)
+		queue := NewPriority[TestRequest, TestResponse](testConfig, testExecutor, tracer)
 		wg := sync.WaitGroup{}
 		for x := 0; x < 20; x++ {
 			x := x
